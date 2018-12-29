@@ -117,7 +117,7 @@ Tensor & s_copy_(Tensor & self, const Tensor & src, bool non_blocking) const ove
 }
 ```
 
-The above change will make following statements operational:
+The above change (view [here](https://github.com/soumyarooproy/bfloat16_pytorch_cpp_extn/blob/master/bfloat16lib.cpp)) will make following statements operational:
 
 ```python
 >>> f = torch.randn(1, 2)
@@ -150,7 +150,7 @@ Tensor& _s_copy__cpu(Tensor& self, const Tensor& src, bool non_blocking) {
 ```
 View the change [here](https://github.com/soumyarooproy/pytorch/pull/1/files#diff-c5340516a13442de843ba89fc4bb92a2).
 
-The above change (view [here](https://github.com/soumyarooproy/bfloat16_pytorch_cpp_extn/blob/master/bfloat16lib.cpp)) will make following statements operational:
+The above change will make following statements operational:
 
 ```python
 ...
