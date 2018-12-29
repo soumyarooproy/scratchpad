@@ -4,7 +4,7 @@ This tutorial walks the reader through the steps required to add a new tensor ty
 
 The goal of this document is to provide hardware/system researchers/engineers who are new to PyTorch a reference quide for some of the lower-level implementation details and APIs in PyTorch so that they can extend PyTorch on custom AI hardware/accelerators.
 
-**Note that the steps/suggestions made in this write-up are merely for prototyping and a significant effort is expected to get it working in production.**
+**Note that the steps/suggestions made in this write-up are merely for prototyping and a significant effort is expected to get it working in production. Furthermore, functional testing is out of scope of this tutorial.**
 
 ## Prerequisites
 
@@ -80,7 +80,9 @@ Handle `bfloat16` scalar type in [`aten/src/ATen/DLConvertor.cpp`](https://githu
 
 ### C++ Extension for `bfloat16` Tensor
 
-With the PyTorch changes described above, simply copying [complex type tensor c++ extension source](https://github.com/pytorch/pytorch/blob/master/test/cpp_extensions/complex_registration_extension.cpp) and replacing the occurrences of complex types with `bfloat16` types will enable creation of empty `bfloat16` tensors.
+With the PyTorch changes described above, simply copying [complex type tensor c++ extension source](https://github.com/pytorch/pytorch/blob/master/test/cpp_extensions/complex_registration_extension.cpp) and replacing the occurrences of complex types with `bfloat16` types is a starting point. The resulting repo is [bfloat16_pytorch_cpp_extn](https://github.com/soumyarooproy/bfloat16_pytorch_cpp_extn).
+
+This will enable creation of empty `bfloat16` tensors.
 
 ``` python
 >>> b = torch.empty(2,2,dtype=torch.bfloat16)
@@ -98,7 +100,7 @@ However, attempting to print a `bfloat16` tensor results in an error. Similarly,
 
 #### 1. Convert `torch.float` Tensor to `torch.bfloat16` Tensor
 
-The straighforward way to achieve this is to override the `s_copy_()` method for `CPUBFloat16Type`. This bypasses the dynamic dispatch copy logic resident in `native/Copy.[h,cpp]`, which at the time of writing this document was located in `aten/src/ATen`.
+The straighforward way to achieve this is to override the `s_copy_()` method for `CPUBFloat16Type`. This bypasses the dynamic dispatch copy logic resident in `aten/src/ATen/native/Copy.[h,cpp]`.
 
 ```c++
 Tensor & s_copy_(Tensor & self, const Tensor & src, bool non_blocking) const override {
@@ -131,6 +133,7 @@ torch.bfloat16
 Supporting this is more invasive in that the change probably cannot merely reside as part of the C++ Extension but has to be made in the PyTorch codebase. This is because the `float` tensor's copy method(s) need to be made aware of `bfloat16` type and the appropriate conversion semantics. Since the auto-generated code for `CPUFloatType` delegates the copy logic to the dynamic dispatch copy logic resident in `native/Copy.[h,cpp]`, one option is to add supporting code to `_s_copy__cpu()` function.
 
 ```c++
+Tensor& _s_copy__cpu(Tensor& self, const Tensor& src, bool non_blocking) {
 ...
   if (self.type().scalarType() == at::ScalarType::Float
       && src.type().scalarType() == at::ScalarType::BFloat16) {
@@ -143,9 +146,11 @@ Supporting this is more invasive in that the change probably cannot merely resid
     return self;
   }
 ...
+}
 ```
+View the change [here](https://github.com/soumyarooproy/pytorch/pull/1/files#diff-c5340516a13442de843ba89fc4bb92a2).
 
-The above change will make following statements operational:
+The above change (view [here](https://github.com/soumyarooproy/bfloat16_pytorch_cpp_extn/blob/master/bfloat16lib.cpp)) will make following statements operational:
 
 ```python
 ...
@@ -161,13 +166,28 @@ torch.float32
 From what I can tell, printing a tensor invokes the [`item()` method](https://github.com/pytorch/pytorch/blob/master/aten/src/ATen/native/Scalar.cpp#L7) for each tensor element, which subsequently calls the `_local_dense_scalar()` for the scalar type. Therefore, overriding that method for `CPUBFloat16Type`
 will suffice.
 
-1. Add appropriate hooks in the `__str__` method for `torch.tensor` in python. `torch/_tensor_str.py` houses the tensor printing code, which is invoked from the `Tensor` class defined in `torch/tensor.py`.
+Next, make [a small change to `torch/_tensor_str.py`](https://github.com/soumyarooproy/pytorch/pull/1/files#diff-f4eb2d7bbb99a6ea648fcc476f38659e), which houses the tensor printing code. It is invoked from the `__str__` method in the `Tensor` class defined in `torch/tensor.py`.
+
+These changes will enable printing of `bfloat16` tensor elements:
+
+```python
+>>> f = torch.randn(2,3)
+>>> f
+tensor([[ 1.0492,  0.3295, -0.1655],
+        [ 0.6302, -1.7262,  0.0020]])
+>>> b = f.to(dtype=torch.bfloat16)
+>>> b
+tensor([[ 1.0469,  0.3281, -0.1650],
+        [ 0.6289, -1.7188,  0.0020]], dtype=torch.bfloat16)
+```
+
+You can see from the values above that, as expected, some quantization affect is in play.
 
 **Note:** A cursory look at the code around printing suggests that including `bfloat16` type in the `is_floating_point()` and/or `isFloatingPoint()` methods may take care of printing out of the box. But this needs to be explored and confirmed.
 
 #### 4. Matrix Multiplication
 
-In this example, I define a simple serial matrix-multiplication implementation which is restricted to only contiguous `bfloat16` matrices. Therefore, for instance, `x.mm(x.t())` is not supported because `t()` transpose method does not change the layout of the tensor but it merely alters a tensor property to record that the tensor has been transposed.
+In this [example](https://github.com/soumyarooproy/bfloat16_pytorch_cpp_extn/blob/master/bfloat16lib.cpp), I define a simple serial matrix-multiplication implementation which is restricted to only contiguous `bfloat16` matrices. Therefore, for instance, `x.mm(x.t())` is not supported because `t()` transpose method does not change the layout of the tensor but it merely alters a tensor property to record that the tensor has been transposed.
 
 Another important thing to note is that the accumulation in this matrix-multiplication kernel is performed in `float` even though the tensor elements are in `bfloat16`. The final accumulated result is converted back to `bfloat16` to generate a `bfloat16` output tensor. Refer to [`MatMulOp::Compute()` in TensorFlow](https://github.com/tensorflow/tensorflow/blob/master/tensorflow/core/kernels/matmul_op.cc) for details.
 
@@ -224,4 +244,19 @@ Tensor mm(const Tensor & self, const Tensor & mat2) const override {
     result_->maybe_zero_dim(self_->dim() == 0 && mat2_->dim() == 0);
     return result;
 }
+```
+
+Now, you can multiply two `bfloat16` matrices:
+
+```python
+>>> f1 = torch.randn(2,3)
+>>> f2 = torch.randn(3,4)
+>>> f1.mm(f2)
+tensor([[ 0.0708, -1.1501, -0.4466,  0.8815],
+        [ 1.7649,  0.1642, -0.4975, -1.8774]])
+>>> b1 = f1.to(dtype=torch.bfloat16)
+>>> b2 = f2.to(dtype=torch.bfloat16)
+>>> b1.mm(b2)
+tensor([[ 0.0688, -1.1406, -0.4453,  0.8750],
+        [ 1.7422,  0.1611, -0.4941, -1.8594]], dtype=torch.bfloat16)
 ```
